@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESL Racing - Pro Dashboard</title>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+
+    <style>
+        :root {
+            --bg: #090a0f; --bg-panel: #11141d;
+            --primary: #00ffcc; --secondary: #7000ff; 
+            --danger: #ff0055; --success: #00ff66; --text: #ffffff;
+        }
+        * { box-sizing: border-box; font-family: 'Segoe UI', sans-serif; user-select: none; }
+        body { margin: 0; background: var(--bg); color: var(--text); height: 100vh; display: flex; overflow: hidden; }
+
+        /* Sidebar - Room List */
+        #sidebar { width: 300px; background: var(--bg-panel); border-right: 2px solid rgba(0,255,204,0.2); display: flex; flex-direction: column; padding: 20px; z-index: 10; box-shadow: 5px 0 20px rgba(0,0,0,0.5);}
+        #sidebar h2 { color: var(--primary); margin-top: 0; font-style: italic; letter-spacing: 1px; text-transform: uppercase; font-size: 24px; text-shadow: 0 0 10px rgba(0,255,204,0.4); }
+        .room-item { background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px; margin-bottom: 10px; cursor: pointer; transition: 0.2s; border-left: 4px solid transparent; display: flex; justify-content: space-between; align-items: center;}
+        .room-item:hover { background: rgba(255,255,255,0.1); }
+        .room-item.active { border-color: var(--primary); background: rgba(0,255,204,0.1); }
+        .room-id { font-weight: 900; font-size: 18px; }
+        .room-count { font-size: 12px; color: #888; background: rgba(0,0,0,0.5); padding: 3px 8px; border-radius: 10px;}
+
+        /* Main Content */
+        #main { flex: 1; display: flex; flex-direction: column; position: relative; }
+        
+        /* Top Bar - Controls */
+        #top-bar { padding: 20px 40px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(to bottom, rgba(17,20,29,0.9), transparent); z-index: 10; }
+        #current-room-title { font-size: 32px; font-weight: 900; color: white; margin: 0; letter-spacing: 2px; }
+        .status-badge { display: inline-block; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-left: 15px; text-transform: uppercase; vertical-align: middle; }
+        .status-waiting { background: rgba(255,215,0,0.2); color: #ffd700; border: 1px solid #ffd700; }
+        .status-playing { background: rgba(0,255,102,0.2); color: var(--success); border: 1px solid var(--success); }
+
+        .btn-group { display: flex; gap: 15px; }
+        .btn { padding: 12px 25px; border-radius: 8px; border: none; font-size: 14px; font-weight: 900; cursor: pointer; text-transform: uppercase; transition: 0.2s; color: black; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        .btn:active { transform: scale(0.95); }
+        .btn-start { background: var(--primary); box-shadow: 0 0 15px rgba(0,255,204,0.4); }
+        .btn-start:hover { box-shadow: 0 0 25px rgba(0,255,204,0.6); }
+        .btn-danger { background: var(--danger); color: white; box-shadow: 0 0 15px rgba(255,0,85,0.4); }
+        .btn-danger:hover { box-shadow: 0 0 25px rgba(255,0,85,0.6); }
+
+        /* Canvas Track */
+        #track-container { flex: 1; position: relative; background: radial-gradient(circle at center, #1a1c29 0%, #090a0f 100%); overflow: hidden; display: flex; justify-content: center; align-items: center;}
+        canvas { display: block; width: 100%; height: 100%; position: absolute; top:0; left:0; }
+        
+        /* Empty State */
+        #empty-state { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #555; pointer-events: none; }
+        #empty-state h1 { font-size: 40px; margin-bottom: 5px; }
+
+    </style>
+</head>
+<body>
+
+    <div id="sidebar">
+        <h2>Host Dashboard</h2>
+        <p style="color: #666; font-size: 13px; margin-top: -15px; margin-bottom: 25px;">Active Sessions</p>
+        <div id="room-list">
+            </div>
+    </div>
+
+    <div id="main">
+        <div id="top-bar" style="display: none;">
+            <div>
+                <h1 id="current-room-title">ROOM <span id="room-code-display" style="color: var(--primary);">---</span></h1>
+                <span id="room-status" class="status-badge status-waiting">Waiting</span>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-danger" onclick="deleteCurrentRoom()">🗑️ Delete Room</button>
+                <button class="btn btn-start" id="btn-start" onclick="startCurrentRoom()">🏁 Start Race</button>
+            </div>
+        </div>
+
+        <div id="track-container">
+            <div id="empty-state">
+                <h1>📡</h1>
+                <p>Select a room to monitor live telemetry</p>
+            </div>
+            <canvas id="live-map"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // MISMA CONFIGURACIÓN DE FIREBASE DEL JUEGO
+        const firebaseConfig = {
+            apiKey: "AIzaSyBgrOIewoSwJ8lBUGyqph2mYtzTHGxq3aM",
+            authDomain: "eslrace.firebaseapp.com",
+            databaseURL: "https://eslrace-default-rtdb.firebaseio.com",
+            projectId: "eslrace"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+
+        let currentRoomCode = null;
+        let activePlayers = {};
+        let roomState = {};
+
+        // Canvas Setup
+        const canvas = document.getElementById('live-map');
+        const ctx = canvas.getContext('2d');
+        function resizeCanvas() { canvas.width = canvas.parentElement.clientWidth; canvas.height = canvas.parentElement.clientHeight; }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // 1. ESCUCHAR TODAS LAS SALAS PARA EL SIDEBAR
+        db.ref('rooms').on('value', snap => {
+            const rooms = snap.val() || {};
+            const listDiv = document.getElementById('room-list');
+            listDiv.innerHTML = '';
+
+            let roomCodes = Object.keys(rooms);
+            
+            if(roomCodes.length === 0) {
+                listDiv.innerHTML = '<p style="color:#555; text-align:center; margin-top: 20px;">No active rooms</p>';
+                if(currentRoomCode) selectRoom(null); // Deseleccionar si se borró la última
+                return;
+            }
+
+            roomCodes.forEach(code => {
+                const roomData = rooms[code];
+                const pCount = roomData.players ? Object.keys(roomData.players).length : 0;
+                
+                const div = document.createElement('div');
+                div.className = `room-item ${currentRoomCode === code ? 'active' : ''}`;
+                div.onclick = () => selectRoom(code);
+                div.innerHTML = `
+                    <span class="room-id">#${code}</span>
+                    <span class="room-count">👥 ${pCount}</span>
+                `;
+                listDiv.appendChild(div);
+            });
+
+            // Si la sala seleccionada actualmente fue borrada por otra vía, deseleccionarla
+            if(currentRoomCode && !rooms[currentRoomCode]) selectRoom(null);
+        });
+
+        // 2. SELECCIONAR UNA SALA Y ESCUCHAR SUS JUGADORES/ESTADO
+        function selectRoom(code) {
+            // Limpiar listeners de la sala anterior
+            if(currentRoomCode) {
+                db.ref(`rooms/${currentRoomCode}/players`).off();
+                db.ref(`rooms/${currentRoomCode}/state`).off();
+            }
+
+            currentRoomCode = code;
+            
+            // Actualizar UI del Sidebar
+            document.querySelectorAll('.room-item').forEach(el => el.classList.remove('active'));
+            
+            if(!code) {
+                document.getElementById('empty-state').style.display = 'block';
+                document.getElementById('top-bar').style.display = 'none';
+                activePlayers = {};
+                return;
+            }
+
+            // Encontrar el elemento clickeado y añadir 'active'
+            const items = document.querySelectorAll('.room-item');
+            items.forEach(el => { if(el.innerText.includes(`#${code}`)) el.classList.add('active'); });
+
+            // Actualizar UI Principal
+            document.getElementById('empty-state').style.display = 'none';
+            document.getElementById('top-bar').style.display = 'flex';
+            document.getElementById('room-code-display').innerText = code;
+
+            // Escuchar Jugadores
+            db.ref(`rooms/${code}/players`).on('value', snap => {
+                activePlayers = snap.val() || {};
+            });
+
+            // Escuchar Estado del juego
+            db.ref(`rooms/${code}/state`).on('value', snap => {
+                roomState = snap.val() || {};
+                const statusBadge = document.getElementById('room-status');
+                const btnStart = document.getElementById('btn-start');
+
+                if(roomState.playing) {
+                    statusBadge.className = 'status-badge status-playing';
+                    statusBadge.innerText = 'RACING LIVE';
+                    btnStart.innerText = '🔄 Restart Race';
+                    btnStart.style.background = '#ffaa00';
+                    btnStart.style.boxShadow = '0 0 15px rgba(255,170,0,0.4)';
+                } else {
+                    statusBadge.className = 'status-badge status-waiting';
+                    statusBadge.innerText = 'WAITING IN LOBBY';
+                    btnStart.innerText = '🏁 Start Race';
+                    btnStart.style.background = 'var(--primary)';
+                    btnStart.style.boxShadow = '0 0 15px rgba(0,255,204,0.4)';
+                }
+            });
+        }
+
+        // 3. CONTROLES DEL HOST
+        function startCurrentRoom() {
+            if(!currentRoomCode) return;
+            // Configura "playing: true" y tiempo límite de 10 minutos (600,000 ms)
+            db.ref(`rooms/${currentRoomCode}/state`).set({
+                playing: true,
+                endTime: Date.now() + (10 * 60 * 1000) 
+            });
+            // Resetear el progreso de todos a 0 si es un restart
+            for(let id in activePlayers) {
+                db.ref(`rooms/${currentRoomCode}/players/${id}`).update({ progress: 0, fuel: 0, x: 0 });
+            }
+        }
+
+        function deleteCurrentRoom() {
+            if(!currentRoomCode) return;
+            if(confirm(`Are you sure you want to DELETE room ${currentRoomCode}? This will kick all players.`)) {
+                db.ref(`rooms/${currentRoomCode}`).remove();
+                selectRoom(null);
+            }
+        }
+
+        // 4. MOTOR DE RENDERIZADO DEL MAPA EN VIVO
+        function drawTopDownCar(ctx, x, y, color, name, progress) {
+            ctx.save();
+            ctx.translate(x, y);
+            
+            // Sombra
+            ctx.shadowBlur = 10; ctx.shadowColor = "rgba(0,0,0,0.5)";
+            
+            // Llantas
+            ctx.fillStyle = "#111";
+            ctx.fillRect(-15, -12, 10, 5); ctx.fillRect(15, -12, 10, 5);
+            ctx.fillRect(-15, 7, 10, 5);   ctx.fillRect(15, 7, 10, 5);
+            
+            // Cuerpo del auto (apuntando a la derecha)
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.roundRect(-20, -10, 45, 20, 4);
+            ctx.fill();
+            
+            // Cabina
+            ctx.fillStyle = "#090a0f";
+            ctx.beginPath();
+            ctx.roundRect(-5, -6, 20, 12, 2);
+            ctx.fill();
+
+            ctx.shadowBlur = 0;
+
+            // Nombre y Porcentaje
+            ctx.fillStyle = "white";
+            ctx.font = "bold 14px Arial";
+            ctx.textAlign = "left";
+            ctx.fillText(name, -20, -18);
+            
+            ctx.fillStyle = "var(--primary)";
+            ctx.font = "12px Courier New";
+            ctx.fillText(Math.floor(progress) + "%", -20, 28);
+
+            ctx.restore();
+        }
+
+        function renderMap() {
+            if(!currentRoomCode) {
+                requestAnimationFrame(renderMap);
+                return;
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const playersArr = Object.values(activePlayers);
+            const numLanes = Math.max(playersArr.length, 4); // Minimo 4 carriles por estetica
+            const trackHeight = canvas.height * 0.8;
+            const startY = (canvas.height - trackHeight) / 2;
+            const laneHeight = trackHeight / numLanes;
+
+            const startX = 100;
+            const endX = canvas.width - 150;
+            const trackLength = endX - startX;
+
+            // Dibujar fondo de pista
+            ctx.fillStyle = "rgba(15, 20, 30, 0.6)";
+            ctx.fillRect(startX - 50, startY, trackLength + 100, trackHeight);
+
+            // Dibujar lineas de la pista
+            ctx.lineWidth = 2;
+            for(let i = 0; i <= numLanes; i++) {
+                ctx.strokeStyle = (i === 0 || i === numLanes) ? "var(--primary)" : "rgba(255,255,255,0.1)";
+                if(i !== 0 && i !== numLanes) ctx.setLineDash([15, 10]); else ctx.setLineDash([]);
+                ctx.beginPath();
+                ctx.moveTo(startX - 50, startY + (i * laneHeight));
+                ctx.lineTo(endX + 50, startY + (i * laneHeight));
+                ctx.stroke();
+            }
+            ctx.setLineDash([]);
+
+            // Linea de Salida
+            ctx.fillStyle = "#333"; ctx.fillRect(startX - 20, startY, 20, trackHeight);
+            ctx.fillStyle = "white";
+            for(let y = startY; y < startY + trackHeight; y+=20) {
+                ctx.fillRect(startX - 20, y + ((y/20)%2===0?0:10), 10, 10);
+                ctx.fillRect(startX - 10, y + ((y/20)%2===0?10:0), 10, 10);
+            }
+
+            // Linea de Meta (Finish)
+            ctx.fillStyle = "#333"; ctx.fillRect(endX, startY, 20, trackHeight);
+            ctx.fillStyle = "white";
+            for(let y = startY; y < startY + trackHeight; y+=20) {
+                ctx.fillRect(endX, y + ((y/20)%2===0?0:10), 10, 10);
+                ctx.fillRect(endX + 10, y + ((y/20)%2===0?10:0), 10, 10);
+            }
+            
+            // Texto de Meta
+            ctx.fillStyle = "var(--primary)";
+            ctx.font = "bold 20px Arial";
+            ctx.textAlign = "center";
+            ctx.save();
+            ctx.translate(endX + 40, canvas.height/2);
+            ctx.rotate(-Math.PI/2);
+            ctx.fillText("FINISH LINE", 0, 0);
+            ctx.restore();
+
+            // Dibujar Jugadores
+            playersArr.forEach((p, index) => {
+                // p.progress va de 0 a 100
+                const prog = Math.min(Math.max(p.progress, 0), 100); 
+                
+                // Mapear progreso (0-100) a coordenadas X (startX - endX)
+                const carX = startX + (trackLength * (prog / 100));
+                
+                // Centrar auto en su carril correspondiente
+                const carY = startY + (index * laneHeight) + (laneHeight / 2);
+
+                drawTopDownCar(ctx, carX, carY, p.color || "#ffffff", p.name || "Anon", prog);
+            });
+
+            requestAnimationFrame(renderMap);
+        }
+
+        // Iniciar ciclo de dibujo
+        renderMap();
+    </script>
+</body>
+</html>
